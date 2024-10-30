@@ -85,6 +85,7 @@ int main(int argc, char **argv)
     nghttp3_callbacks callbacks = {0};
     size_t num_nv = 0;
     const char *addr;
+    int loop = 996666;
 
     /* Check arguments. */
     if (argc < 2) {
@@ -98,8 +99,10 @@ int main(int argc, char **argv)
     if ((ctx = SSL_CTX_new(OSSL_QUIC_client_method())) == NULL)
         goto err;
 
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
 
+    /* if (SSL_CTX_set_default_verify_paths(ctx) == 0) */
+    /* if (SSL_CTX_load_verify_file(ctx, "/etc/pki/CA/cacert.pem") == 0) */
     if (SSL_CTX_set_default_verify_paths(ctx) == 0)
         goto err;
 
@@ -121,23 +124,32 @@ int main(int argc, char **argv)
     make_nv(&nva[num_nv++], ":method", "GET");
     make_nv(&nva[num_nv++], ":scheme", "https");
     make_nv(&nva[num_nv++], ":authority", addr);
-    make_nv(&nva[num_nv++], ":path", "/");
+    make_nv(&nva[num_nv++], ":path", "/11.png");
     make_nv(&nva[num_nv++], "user-agent", "OpenSSL-Demo/nghttp3");
 
-    /* Submit request. */
-    if (!OSSL_DEMO_H3_CONN_submit_request(conn, nva, num_nv, NULL, NULL)) {
-        ERR_raise_data(ERR_LIB_USER, ERR_R_OPERATION_FAIL,
-                       "cannot submit HTTP/3 request");
-        goto err;
-    }
-
-    /* Wait for request to complete. */
-    while (!done)
-        if (!OSSL_DEMO_H3_CONN_handle_events(conn)) {
+    while(loop--) {
+        /* Submit request. */
+        fflush(stdout);
+        printf("Submit request\n");
+        done = 0;
+        if (!OSSL_DEMO_H3_CONN_submit_request(conn, nva, num_nv, NULL, NULL)) {
+            printf("Submit request FAILED\n");
+            fflush(stdout);
             ERR_raise_data(ERR_LIB_USER, ERR_R_OPERATION_FAIL,
-                           "cannot handle events");
+                           "cannot submit HTTP/3 request");
             goto err;
         }
+
+        /* Wait for request to complete. */
+        printf("Read response\n");
+        while (!done)
+            if (!OSSL_DEMO_H3_CONN_handle_events(conn)) {
+                printf("Read response FAILED\n");
+                ERR_raise_data(ERR_LIB_USER, ERR_R_OPERATION_FAIL,
+                               "cannot handle events");
+                goto err;
+            }
+       }
 
     ret = 0;
 err:

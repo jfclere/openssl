@@ -16,7 +16,7 @@ enum {
     OSSL_DEMO_H3_STREAM_TYPE_CTRL_SEND,
     OSSL_DEMO_H3_STREAM_TYPE_QPACK_ENC_SEND,
     OSSL_DEMO_H3_STREAM_TYPE_QPACK_DEC_SEND,
-    OSSL_DEMO_H3_STREAM_TYPE_REQ,
+    OSSL_DEMO_H3_STREAM_TYPE_REQ
 };
 
 #define BUF_SIZE    4096
@@ -315,6 +315,7 @@ OSSL_DEMO_H3_CONN *OSSL_DEMO_H3_CONN_new_for_conn(BIO *qconn_bio,
     if ((s_qpdec_send
             = h3_conn_create_stream(conn, OSSL_DEMO_H3_STREAM_TYPE_QPACK_DEC_SEND)) == NULL)
         goto err;
+    printf("stream created %ld %ld %ld\n", s_ctl_send->id, s_qpenc_send->id, s_qpdec_send->id);
 
     if (settings == NULL) {
         nghttp3_settings_default(&dsettings);
@@ -467,7 +468,9 @@ static void h3_conn_pump_stream(OSSL_DEMO_H3_STREAM *s, void *conn_)
          */
         return;
 
+    printf("h3_conn_pump_stream starting on %ld\n", s->id);
     for (;;) {
+        printf("h3_conn_pump_stream doing...\n");
         if (s->s == NULL /* If we already did STOP_SENDING, ignore this stream. */
             /* If this is a write-only stream, there is no read data to check. */
             || SSL_get_stream_read_state(s->s) == SSL_STREAM_STATE_WRONG_DIR
@@ -486,11 +489,14 @@ static void h3_conn_pump_stream(OSSL_DEMO_H3_STREAM *s, void *conn_)
          */
         if (s->buf_cur == s->buf_total) {
             /* Need more data. */
+            printf("SSL_read_ex on %ld\n", s->id);
             ec = SSL_read_ex(s->s, s->buf, sizeof(s->buf), &num_bytes);
+            printf("SSL_read_ex on %ld got %d\n", s->id, num_bytes);
             if (ec <= 0) {
                 num_bytes = 0;
                 if (SSL_get_error(s->s, ec) == SSL_ERROR_ZERO_RETURN) {
                     /* Stream concluded normally. Pass FIN to HTTP/3 stack. */
+                    printf("SSL_read_ex on %ld got %d NORMAL END\n", s->id, num_bytes);
                     ec = nghttp3_conn_read_stream(conn->h3conn, s->id, NULL, 0,
                                                   /*fin=*/1);
                     if (ec < 0) {
@@ -518,6 +524,12 @@ static void h3_conn_pump_stream(OSSL_DEMO_H3_STREAM *s, void *conn_)
                     s->done_recv_fin = 1;
                 } else {
                     /* Other error. */
+                    if (ec == 0) {
+                        if (SSL_get_stream_type(s->s) == SSL_STREAM_TYPE_READ) {
+                            printf("SSL_read_ex on %ld got %d\n", s->id, ec);
+                            break;
+                        }
+                    }
                     goto err;
                 }
             }
@@ -552,9 +564,16 @@ static void h3_conn_pump_stream(OSSL_DEMO_H3_STREAM *s, void *conn_)
          * bytes which nghttp3 consumed.
          */
         consumed = ec + conn->consumed_app_data;
+        printf("h3_conn_pump_stream doing consumed %d...\n", consumed);
         assert(consumed <= s->buf_total - s->buf_cur);
         s->buf_cur += consumed;
+        printf("h3_conn_pump_stream doing consumed %d %d\n", s->buf_cur, s->buf_total);
         conn->consumed_app_data = 0;
+        /* hack for the test */
+        printf("h3_conn_pump_stream %ld %d %d\n", s->id, SSL_get_stream_type(s->s), SSL_STREAM_TYPE_READ);
+        if (s->buf_cur == s->buf_total && SSL_get_stream_type(s->s) == SSL_STREAM_TYPE_READ) {
+            break;
+        }
     }
 
     return;
@@ -572,8 +591,12 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
     OSSL_DEMO_H3_STREAM key, *s;
     SSL *snew;
 
-    if (conn == NULL)
+    if (conn == NULL) {
+        printf("OSSL_DEMO_H3_CONN_handle_events conn == NUL\n");
         return 0;
+    }
+    printf("OSSL_DEMO_H3_CONN_handle_events\n");
+
 
     /*
      * We handle events by doing three things:
@@ -587,6 +610,9 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
     for (;;) {
         if ((snew = SSL_accept_stream(conn->qconn, SSL_ACCEPT_STREAM_NO_BLOCK)) == NULL)
             break;
+        printf("New stream %ld type %d\n", SSL_get_stream_id(snew), SSL_get_stream_type(snew) );
+        if (SSL_get_stream_type(snew) == SSL_STREAM_TYPE_READ)
+            SSL_set_blocking_mode(snew, 0);
 
         /*
          * Each new incoming stream gets wrapped into an OSSL_DEMO_H3_STREAM object and
@@ -598,6 +624,7 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
         }
     }
 
+    printf("OSSL_DEMO_H3_CONN_handle_events 2\n");
     /* 2. Pump outgoing data from HTTP/3 engine to QUIC. */
     for (;;) {
         /*
@@ -609,8 +636,10 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
          */
         ec = nghttp3_conn_writev_stream(conn->h3conn, &stream_id, &fin,
                                         vecs, ARRAY_LEN(vecs));
-        if (ec < 0)
+        if (ec < 0) {
+            printf("nghttp3_conn_writev_stream failed\n");
             return 0;
+        }
         if (ec == 0)
             break;
 
@@ -621,6 +650,7 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
         flags = (fin == 0) ? 0 : SSL_WRITE_FLAG_CONCLUDE;
 
         /* For each of the vectors returned, pass it to OpenSSL QUIC. */
+        printf("OSSL_DEMO_H3_CONN_handle_events 2 for stream %ld (flags: %d)\n", stream_id, flags);
         key.id = stream_id;
         if ((s = lh_OSSL_DEMO_H3_STREAM_retrieve(conn->streams, &key)) == NULL) {
             ERR_raise_data(ERR_LIB_USER, ERR_R_INTERNAL_ERROR,
@@ -632,6 +662,7 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
         total_len = nghttp3_vec_len(vecs, num_vecs);
         total_written = 0;
         for (i = 0; i < num_vecs; ++i) {
+            printf("Writting on %ld\n", s->id);
             if (vecs[i].len == 0)
                 continue;
 
@@ -644,6 +675,7 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
                      * We have filled our send buffer so tell nghttp3 to stop
                      * generating more data; we have to do this explicitly.
                      */
+                    printf("Writting on %ldi BLOCKED\n", s->id);
                     written = 0;
                     nghttp3_conn_block_stream(conn->h3conn, stream_id);
                 } else {
@@ -698,6 +730,7 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
     }
 
     /* 3. Pump incoming data from QUIC to HTTP/3 engine. */
+    printf("OSSL_DEMO_H3_CONN_handle_events 3\n");
     conn->pump_res = 1; /* cleared in below call if an error occurs */
     lh_OSSL_DEMO_H3_STREAM_doall_arg(conn->streams, h3_conn_pump_stream, conn);
     if (!conn->pump_res)
@@ -705,6 +738,8 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
 
     return 1;
 }
+
+static  OSSL_DEMO_H3_STREAM *s_old = NULL;
 
 int OSSL_DEMO_H3_CONN_submit_request(OSSL_DEMO_H3_CONN *conn,
                                      const nghttp3_nv *nva, size_t nvlen,
@@ -721,14 +756,22 @@ int OSSL_DEMO_H3_CONN_submit_request(OSSL_DEMO_H3_CONN *conn,
     }
 
     /* Each HTTP/3 request is represented by a stream. */
-    if ((s_req = h3_conn_create_stream(conn, OSSL_DEMO_H3_STREAM_TYPE_REQ)) == NULL)
+    if ((s_req = h3_conn_create_stream(conn, OSSL_DEMO_H3_STREAM_TYPE_REQ)) == NULL) {
         goto err;
+    }
 
     s_req->user_data = user_data;
+    printf("Created stream %ld\n", s_req->id);
+
+    /* remove the old one */
+    if (s_old)
+        h3_conn_remove_stream(conn, s_old);
+    s_old = s_req;
 
     ec = nghttp3_conn_submit_request(conn->h3conn, s_req->id, nva, nvlen,
                                      dr, s_req);
     if (ec < 0) {
+        printf("nghttp3_conn_submit_request stream %ld failed\n", s_req->id);
         ERR_raise_data(ERR_LIB_USER, ERR_R_INTERNAL_ERROR,
                        "cannot submit HTTP/3 request: %s (%d)",
                        nghttp3_strerror(ec), ec);
