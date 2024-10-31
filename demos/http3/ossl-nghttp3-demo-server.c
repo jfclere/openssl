@@ -34,7 +34,7 @@ struct ssl_id {
 #define SERVERUNIOPEN  0x08 /* unidirectional open by the server (3, 7 and 11) */
 #define SERVERCLOSED   0x10 /* closed by the server (us) */
 
-#define MAXSSL_IDS 20000
+#define MAXSSL_IDS 20
 #define MAXURL 255
 
 struct h3ssl {
@@ -435,7 +435,7 @@ static int read_from_ssl_ids(nghttp3_conn *h3conn, struct h3ssl *h3ssl)
                    (unsigned long long) id);
             if (h3ssl->id_bidi != UINT64_MAX) {
                 /* XXX check if closed ... */
-                /* remove_id(h3ssl->id_bidi, h3ssl); */
+                remove_id(h3ssl->id_bidi, h3ssl);
             }
             h3ssl->id_bidi = id;
             reuse_h3ssl(h3ssl);
@@ -500,9 +500,8 @@ static int read_from_ssl_ids(nghttp3_conn *h3conn, struct h3ssl *h3ssl)
     }
     if (item->revents != processed_event) {
         /* we missed something we need to figure out */
-        printf("Missed revent %llu (%d) on %llu\n",
-               (unsigned long long)item->revents, SSL_POLL_EVENT_W,
-               (unsigned long long)SSL_get_stream_id(item->desc.value.ssl));
+        printf("Missed revent %llu (%d)\n",
+               (unsigned long long)item->revents, SSL_POLL_EVENT_W);
     }
     if (result_count == 1 && !processed_event) {
         printf("read_from_ssl_ids 1 event only!\n");
@@ -522,6 +521,9 @@ static int read_from_ssl_ids(nghttp3_conn *h3conn, struct h3ssl *h3ssl)
         /* get the stream and id */
         s = item->desc.value.ssl;
         id = SSL_get_stream_id(item->desc.value.ssl);
+        if (id ==  UINT64_MAX) {
+            ERR_print_errors_fp(stderr);
+        }
 
         if (item->revents & SSL_POLL_EVENT_R) {
             /* try to read */
@@ -560,7 +562,7 @@ static int read_from_ssl_ids(nghttp3_conn *h3conn, struct h3ssl *h3ssl)
 
             if (status == SERVERCLOSED) {
                 printf("both sides closed on  %llu\n", (unsigned long long)id);
-                /* remove_id(id, h3ssl); */
+                remove_id(id, h3ssl);
                 hassomething++;
             }
             processed_event = processed_event + SSL_POLL_EVENT_EW;
