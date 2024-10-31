@@ -34,7 +34,7 @@ struct ssl_id {
 #define SERVERUNIOPEN  0x08 /* unidirectional open by the server (3, 7 and 11) */
 #define SERVERCLOSED   0x10 /* closed by the server (us) */
 
-#define MAXSSL_IDS 20
+#define MAXSSL_IDS 20000
 #define MAXURL 255
 
 struct h3ssl {
@@ -172,6 +172,7 @@ static int get_id_status(uint64_t id, struct h3ssl *h3ssl)
     }
     printf("Oops can't set status, can't find stream!!!\n");
     assert(0);
+    return -1;
 }
 
 static int are_all_clientid_closed(struct h3ssl *h3ssl)
@@ -434,7 +435,7 @@ static int read_from_ssl_ids(nghttp3_conn *h3conn, struct h3ssl *h3ssl)
                    (unsigned long long) id);
             if (h3ssl->id_bidi != UINT64_MAX) {
                 /* XXX check if closed ... */
-                remove_id(h3ssl->id_bidi, h3ssl);
+                /* remove_id(h3ssl->id_bidi, h3ssl); */
             }
             h3ssl->id_bidi = id;
             reuse_h3ssl(h3ssl);
@@ -559,7 +560,7 @@ static int read_from_ssl_ids(nghttp3_conn *h3conn, struct h3ssl *h3ssl)
 
             if (status == SERVERCLOSED) {
                 printf("both sides closed on  %llu\n", (unsigned long long)id);
-                remove_id(id, h3ssl);
+                /* remove_id(id, h3ssl); */
                 hassomething++;
             }
             processed_event = processed_event + SSL_POLL_EVENT_EW;
