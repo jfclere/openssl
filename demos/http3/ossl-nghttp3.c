@@ -491,12 +491,12 @@ static void h3_conn_pump_stream(OSSL_DEMO_H3_STREAM *s, void *conn_)
             /* Need more data. */
             printf("SSL_read_ex on %ld\n", s->id);
             ec = SSL_read_ex(s->s, s->buf, sizeof(s->buf), &num_bytes);
-            printf("SSL_read_ex on %ld got %d\n", s->id, num_bytes);
+            printf("SSL_read_ex on %ld got %ld\n", s->id, num_bytes);
             if (ec <= 0) {
                 num_bytes = 0;
                 if (SSL_get_error(s->s, ec) == SSL_ERROR_ZERO_RETURN) {
                     /* Stream concluded normally. Pass FIN to HTTP/3 stack. */
-                    printf("SSL_read_ex on %ld got %d NORMAL END\n", s->id, num_bytes);
+                    printf("SSL_read_ex on %ld got %ld NORMAL END\n", s->id, num_bytes);
                     ec = nghttp3_conn_read_stream(conn->h3conn, s->id, NULL, 0,
                                                   /*fin=*/1);
                     if (ec < 0) {
@@ -564,10 +564,10 @@ static void h3_conn_pump_stream(OSSL_DEMO_H3_STREAM *s, void *conn_)
          * bytes which nghttp3 consumed.
          */
         consumed = ec + conn->consumed_app_data;
-        printf("h3_conn_pump_stream doing consumed %d...\n", consumed);
+        printf("h3_conn_pump_stream doing consumed %ld...\n", consumed);
         assert(consumed <= s->buf_total - s->buf_cur);
         s->buf_cur += consumed;
-        printf("h3_conn_pump_stream doing consumed %d %d\n", s->buf_cur, s->buf_total);
+        printf("h3_conn_pump_stream doing consumed %ld %ld\n", s->buf_cur, s->buf_total);
         conn->consumed_app_data = 0;
         /* hack for the test */
         printf("h3_conn_pump_stream %ld %d %d\n", s->id, SSL_get_stream_type(s->s), SSL_STREAM_TYPE_READ);
@@ -612,7 +612,8 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
             break;
         printf("New stream %ld type %d\n", SSL_get_stream_id(snew), SSL_get_stream_type(snew) );
         if (SSL_get_stream_type(snew) == SSL_STREAM_TYPE_READ)
-            SSL_set_blocking_mode(snew, 0);
+            if (SSL_set_blocking_mode(snew, 0))
+                printf("New stream SSL_set_blocking_mode failed\n");
 
         /*
          * Each new incoming stream gets wrapped into an OSSL_DEMO_H3_STREAM object and
@@ -650,7 +651,7 @@ int OSSL_DEMO_H3_CONN_handle_events(OSSL_DEMO_H3_CONN *conn)
         flags = (fin == 0) ? 0 : SSL_WRITE_FLAG_CONCLUDE;
 
         /* For each of the vectors returned, pass it to OpenSSL QUIC. */
-        printf("OSSL_DEMO_H3_CONN_handle_events 2 for stream %ld (flags: %d)\n", stream_id, flags);
+        printf("OSSL_DEMO_H3_CONN_handle_events 2 for stream %ld (flags: %ld)\n", stream_id, flags);
         key.id = stream_id;
         if ((s = lh_OSSL_DEMO_H3_STREAM_retrieve(conn->streams, &key)) == NULL) {
             ERR_raise_data(ERR_LIB_USER, ERR_R_INTERNAL_ERROR,
