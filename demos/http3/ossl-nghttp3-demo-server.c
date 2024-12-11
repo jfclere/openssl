@@ -277,10 +277,10 @@ static int on_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
     vname = nghttp3_rcbuf_get_buf(name);
     vvalue = nghttp3_rcbuf_get_buf(value);
 
-    fwrite(vname.base, vname.len, 1, stderr);
-    fprintf(stderr, ": ");
-    fwrite(vvalue.base, vvalue.len, 1, stderr);
-    fprintf(stderr, "\n");
+    fwrite(vname.base, vname.len, 1, stdout);
+    fprintf(stdout, ": ");
+    fwrite(vvalue.base, vvalue.len, 1, stdout);
+    fprintf(stdout, "\n");
 
     if (token == NGHTTP3_QPACK_TOKEN__PATH) {
         int len = (((vvalue.len) < (MAXURL)) ? (vvalue.len) : (MAXURL));
@@ -291,7 +291,7 @@ static int on_recv_header(nghttp3_conn *conn, int64_t stream_id, int32_t token,
                 strncpy(h3ssl->url, "index.html", MAXURL);
                 h3ssl->url[MAXURL - 1] = '\0';
             } else {
-                memcpy(h3ssl->url, h3ssl->url + 1, len - 1);
+                memcpy(h3ssl->url, vvalue.base + 1, len - 1);
                 h3ssl->url[len - 1] = '\0';
             }
         }
