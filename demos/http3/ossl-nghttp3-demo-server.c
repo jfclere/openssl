@@ -664,10 +664,21 @@ static int read_from_ssl_ids(nghttp3_conn **curh3conn, struct h3ssl *h3ssl)
 
                     r = SSL_read(s, msg, l);
                     printf("SSL_read tells %d\n", r);
-                    if (r != 0) {
+                    if (r > 0) {
                         ret = -1;
                         goto err;
                     }
+                    r = SSL_get_error(s, r);
+                    if (r != SSL_ERROR_ZERO_RETURN) {
+                        ret = -1;
+                        goto err;
+                    }
+                    printf("SSL_read tells ERROR %d %d\n", r, SSL_ERROR_ZERO_RETURN);
+                    set_id_status(id, TOBEREMOVED, h3ssl);
+                    printf("SSL_read %d BIDI %d\n", id, h3ssl->id_bidi);
+                    has_ids_to_remove++;
+                    /* XXX h3ssl->done = 1; */
+                    /* XXX hassomething++; */
                 }
                 continue;
             }
