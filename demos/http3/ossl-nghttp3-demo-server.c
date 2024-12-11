@@ -1014,7 +1014,10 @@ static int run_quic_server(SSL_CTX *ctx, int fd)
     SSL *listener = NULL;
     nghttp3_conn *h3conn = NULL;
     SSL *ssl;
-    char *fileprefix = getenv("FILEPREFIX");
+    char *fileprefix = getenv("WWW");
+
+    printf("run_quic_server serving %s\n",  (fileprefix == NULL) ? "." : fileprefix);
+    fflush(stdout);
 
     /* Create a new QUIC listener. */
     if ((listener = SSL_new_listener(ctx, 0)) == NULL)
