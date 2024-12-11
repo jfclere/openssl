@@ -1012,11 +1012,9 @@ static int run_quic_server(SSL_CTX *ctx, int fd)
     int ok = 0;
     int hassomething = 0;
     SSL *listener = NULL;
-    struct h3ssl h3ssl;
     nghttp3_conn *h3conn = NULL;
     SSL *ssl;
-
-    h3ssl.fileprefix = getenv("FILEPREFIX");
+    char *fileprefix = getenv("FILEPREFIX");
 
     /* Create a new QUIC listener. */
     if ((listener = SSL_new_listener(ctx, 0)) == NULL)
@@ -1055,8 +1053,10 @@ static int run_quic_server(SSL_CTX *ctx, int fd)
         int numtimeout;
         char slength[11];
         int hasnothing;
+        struct h3ssl h3ssl;
 
         init_ids(&h3ssl);
+        h3ssl.fileprefix = fileprefix;
         printf("listener: %p\n", (void *)listener);
         add_ids_listener(listener, &h3ssl);
 
