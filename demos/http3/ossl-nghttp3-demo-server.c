@@ -655,8 +655,22 @@ static int read_from_ssl_ids(nghttp3_conn **curh3conn, struct h3ssl *h3ssl)
             id = SSL_get_stream_id(item->desc.value.ssl);
             printf("revent READ on %llu\n", (unsigned long long)id);
             r = quic_server_read(h3conn, s, id, h3ssl);
-            if (r == 0)
+            if (r == 0) {
+                int status = get_id_status(id, h3ssl);
+                if (status & SERVERCLOSED) {
+                    /* check that the other side is closed */
+                    uint8_t msg[1];
+                    size_t l = sizeof(msg);
+
+                    r = SSL_read(s, msg, l);
+                    printf("SSL_read tells %d\n", r);
+                    if (r != 0) {
+                        ret = -1;
+                        goto err;
+                    }
+                }
                 continue;
+            }
             if (r == -1) {
                 ret = -1;
                 goto err;
