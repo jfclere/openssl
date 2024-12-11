@@ -507,6 +507,7 @@ static int read_from_ssl_ids(nghttp3_conn **curh3conn, struct h3ssl *h3ssl)
         processed_event = 0;
         /* get the stream */
         s = item->desc.value.ssl;
+        printf("read_from_ssl_ids: event %d\n", item->revents);
 
         /* New connection */
         if (item->revents & SSL_POLL_EVENT_IC) {
