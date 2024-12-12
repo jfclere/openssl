@@ -980,6 +980,9 @@ static int wait_for_activity(SSL *ssl)
     fd_set read_fd, write_fd;
     struct timeval tv;
     struct timeval *tvp = NULL;
+    struct timeval before, after, saved;
+    int ret;
+    int waited;
 
     /* Get hold of the underlying file descriptor for the socket */
     if ((sock = SSL_get_fd(ssl)) == -1) {
@@ -1034,7 +1037,16 @@ static int wait_for_activity(SSL *ssl)
      * "select" (with updated timeouts).
      */
 
-    return (select(sock + 1, &read_fd, &write_fd, NULL, tvp));
+    gettimeofday(&before, NULL);
+    saved = tv;
+    ret =  select(sock + 1, &read_fd, &write_fd, NULL, tvp);
+    gettimeofday(&after, NULL);
+    if (after.tv_usec > before.tv_usec)
+        waited = after.tv_usec-before.tv_usec;
+    else
+        waited = (10000000 - before.tv_usec) + after.tv_usec;
+    printf("WAITED: %d %d .. %d ..\n", saved.tv_sec, saved.tv_usec, waited);
+    return(ret);
 }
 
 /* Main loop for server to accept QUIC connections. */
