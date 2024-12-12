@@ -1009,6 +1009,11 @@ static int wait_for_activity(SSL *ssl)
     if (SSL_get_event_timeout(ssl, &tv, &isinfinite) && !isinfinite)
         tvp = &tv;
 
+    if (isinfinite == 0 && tv.tv_sec == 0 && tv.tv_usec == 0)
+        printf("HAS SOMETHING....\n");
+    else
+        printf("HAS TO WAIT %d %d %d....\n", isinfinite,  tv.tv_sec, tv.tv_usec);
+
     /*
      * Wait until the socket is writeable or readable. We use select here
      * for the sake of simplicity and portability, but you could equally use
