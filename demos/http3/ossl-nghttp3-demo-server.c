@@ -682,6 +682,9 @@ static int read_from_ssl_ids(nghttp3_conn **curh3conn, struct h3ssl *h3ssl)
                     /* XXX hassomething++; */
                 } else {
                     printf("revent READ on %llu read: %d\n", (unsigned long long)id, r);
+                    printf("SSL_read %d not SERVERCLOSED\n");
+                    set_id_status(id, TOBEREMOVED, h3ssl);
+                    has_ids_to_remove++;
                 }
                 continue;
             }
