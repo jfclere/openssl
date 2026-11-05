@@ -5431,6 +5431,110 @@ end:
     return testresult;
 }
 
+/*
+ * Verify that the work-gated port tick correctly tracks idle and active
+ * channels. A connection is established and allowed to go idle. After idle,
+ * the channel's tick_dirty and on_active_channel_list flags must be clear.
+ * Sending data must re-activate the channel and succeed normally.
+ */
+#define WGT_STEPS 20
+static int test_work_gated_tick(void)
+{
+    SSL_CTX *cctx = NULL, *sctx = NULL;
+    SSL *listener = NULL;
+    SSL *clientssl = NULL, *serverssl = NULL;
+    QUIC_CHANNEL *sch = NULL;
+    int testresult = 0, rc, err;
+    unsigned int step;
+    const char *msg = "ping";
+    size_t msglen = strlen(msg), numbytes = 0;
+    unsigned char buf[64];
+
+    if (!TEST_ptr(sctx = create_server_ctx())
+        || !TEST_ptr(cctx = create_client_ctx()))
+        goto err;
+
+    if (!create_quic_ssl_objects_ex(sctx, cctx, NULL,
+            &listener, &clientssl, 1))
+        goto err;
+
+    if (!TEST_true(SSL_set_tlsext_host_name(clientssl, "localhost")))
+        goto err;
+
+    /* Establish the connection. */
+    for (step = 0; step < WGT_STEPS; step++) {
+        rc = SSL_connect(clientssl);
+        if (rc > 0)
+            break;
+        err = SSL_get_error(clientssl, rc);
+        if (!TEST_true(err == SSL_ERROR_WANT_READ
+                || err == SSL_ERROR_WANT_WRITE))
+            goto err;
+        SSL_handle_events(listener);
+        if (serverssl == NULL)
+            serverssl = SSL_accept_connection(listener, 0);
+        if (serverssl != NULL)
+            SSL_handle_events(serverssl);
+        quic_advance_time(clientssl, listener);
+    }
+    if (!TEST_ptr(serverssl)
+        || !TEST_true(SSL_is_init_finished(clientssl)))
+        goto err;
+
+    if (!TEST_ptr(sch = ossl_quic_conn_get_channel(serverssl)))
+        goto err;
+
+    /*
+     * Let the connection go idle. Advance the fake clock past any pending
+     * timers (session tickets, ACK delays, etc.) so the channel quiesces.
+     */
+    for (step = 0; step < WGT_STEPS; step++) {
+        SSL_handle_events(listener);
+        SSL_handle_events(serverssl);
+        SSL_handle_events(clientssl);
+        quic_advance_time(clientssl, listener);
+    }
+
+    /*
+     * The server channel should now be idle: handshake complete, not dirty,
+     * not on the active list.
+     */
+    if (!TEST_true(sch->handshake_complete))
+        goto err;
+
+    if (!TEST_false(sch->tick_dirty)
+        || !TEST_false(sch->on_active_channel_list))
+        goto err;
+
+    /*
+     * Write data on the client. The work-gated tick must re-activate the
+     * server channel when the datagram arrives and deliver the data.
+     */
+    if (!TEST_true(SSL_write_ex(clientssl, msg, msglen, &numbytes))
+        || !TEST_size_t_eq(numbytes, msglen))
+        goto err;
+
+    SSL_handle_events(listener);
+    SSL_handle_events(serverssl);
+
+    if (!TEST_true(SSL_read_ex(serverssl, buf, sizeof(buf), &numbytes))
+        || !TEST_size_t_eq(numbytes, msglen))
+        goto err;
+
+    if (!TEST_mem_eq(buf, numbytes, msg, msglen))
+        goto err;
+
+    testresult = 1;
+err:
+    SSL_free(serverssl);
+    SSL_free(clientssl);
+    SSL_free(listener);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
 /***********************************************************************************/
 OPT_TEST_DECLARE_USAGE("provider config certsdir datadir\n")
 
@@ -5556,6 +5660,7 @@ int setup_tests(void)
     ADD_TEST(test_quic_resize_txe);
     ADD_MFAIL_TEST(test_ssl_new_mfail);
     ADD_TEST(test_pending_limit);
+    ADD_TEST(test_work_gated_tick);
 
     return 1;
 err:
