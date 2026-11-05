@@ -625,12 +625,12 @@ int ossl_quic_channel_schedule_new_token(QUIC_CHANNEL *ch,
     size_t token_len)
 {
     int rc = 0;
-
-    ossl_quic_channel_mark_active(ch);
     QUIC_CFQ_ITEM *cfq_item;
     WPACKET wpkt;
     BUF_MEM *buf_mem = NULL;
     size_t l = 0;
+
+    ossl_quic_channel_mark_active(ch);
 
     buf_mem = BUF_MEM_new();
     if (buf_mem == NULL)
