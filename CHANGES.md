@@ -33,6 +33,13 @@ OpenSSL 4.2
 
 ### Changes between 4.1 and 4.2 [xx XXX xxxx]
 
+ * Improved QUIC multi-connection scalability. The port tick now only
+   services channels with pending work or expired timers instead of
+   scanning every channel, and `SSL_poll` reuses the domain lock across
+   QUIC objects. This reduces per-tick cost from O(n) to O(active).
+
+   *Jean-Frederic Clere*
+
  * Added `BIO_dgram_pair_set0_pcap_file()` which intercepts and writes UDP
    datagrams exchanged of over `BIO_dgram_pair` bio memory object to file
    in libpcap format. To enable `BIO_dgram_pair_set0_pcap_file()` the build
