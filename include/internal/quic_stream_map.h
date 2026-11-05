@@ -877,6 +877,12 @@ size_t ossl_quic_stream_map_get_total_accept_queue_len(QUIC_STREAM_MAP *qsm);
 void ossl_quic_stream_map_gc(QUIC_STREAM_MAP *qsm);
 
 /*
+ * Returns 1 if the stream map holds work which requires a full channel tick
+ * (active streams or streams awaiting GC), 0 otherwise.
+ */
+int ossl_quic_stream_map_has_pending_work(const QUIC_STREAM_MAP *qsm);
+
+/*
  * Begins shutdown stream flush triage. Analyses all streams, including deleted
  * but not yet GC'd streams, to determine if we should wait for that stream to
  * be fully flushed before shutdown. After calling this, call

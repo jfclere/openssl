@@ -105,6 +105,7 @@ typedef struct validation_token {
 
 DEFINE_LIST_OF_IMPL(ch, QUIC_CHANNEL);
 DEFINE_LIST_OF_IMPL(incoming_ch, QUIC_CHANNEL);
+DEFINE_LIST_OF_IMPL(active_ch, QUIC_CHANNEL);
 DEFINE_LIST_OF_IMPL(port, QUIC_PORT);
 
 QUIC_PORT *ossl_quic_port_new(const QUIC_PORT_ARGS *args)
@@ -151,6 +152,16 @@ static int port_init(QUIC_PORT *port)
         goto err;
 
     if ((port->err_state = OSSL_ERR_STATE_new()) == NULL)
+        goto err;
+
+    /*
+     * Preallocate the timer heap so adding the channels of a new connection
+     * does not need an allocation.
+     */
+    port->timer_heap_alloc = 64;
+    port->timer_heap = OPENSSL_malloc(port->timer_heap_alloc
+        * sizeof(*port->timer_heap));
+    if (port->timer_heap == NULL)
         goto err;
 
     if ((port->demux = ossl_quic_demux_new(/*BIO=*/NULL,
@@ -202,6 +213,8 @@ static int port_init(QUIC_PORT *port)
     port->disable_active_migration = 1;
     port->active_conn_id_limit = QUIC_MIN_ACTIVE_CONN_ID_LIMIT;
 
+    ossl_list_active_ch_init(&port->active_channel_list);
+
     port->state = QUIC_PORT_STATE_RUNNING;
 
     ossl_list_port_insert_tail(&port->engine->port_list, port);
@@ -235,6 +248,11 @@ err:
 static void port_cleanup(QUIC_PORT *port)
 {
     assert(ossl_list_ch_num(&port->channel_list) == 0);
+
+    OPENSSL_free(port->timer_heap);
+    port->timer_heap = NULL;
+    port->timer_heap_num = 0;
+    port->timer_heap_alloc = 0;
 
     ossl_quic_demux_free(port->demux);
     port->demux = NULL;
@@ -802,32 +820,263 @@ int ossl_quic_port_test_and_set_peeloff(QUIC_PORT *port, int using_peeloff)
  */
 
 /*
+ * Timer min-heap helpers. The heap has one entry per channel on the port, keyed
+ * by the channel's cached next tick deadline. A channel's entry is updated when
+ * it is ticked, so due timers can be found in O(log n) instead of scanning
+ * every channel. The channel stores its own heap index so a channel can be
+ * removed when it is freed.
+ */
+static int port_timer_less(const QUIC_CHANNEL *a, const QUIC_CHANNEL *b)
+{
+    int c = ossl_time_compare(a->next_tick_deadline, b->next_tick_deadline);
+
+    if (c != 0)
+        return c < 0;
+
+    return (uintptr_t)a < (uintptr_t)b;
+}
+
+static void port_timer_heap_swap(QUIC_PORT *port, size_t a, size_t b)
+{
+    QUIC_CHANNEL *t = port->timer_heap[a];
+
+    port->timer_heap[a] = port->timer_heap[b];
+    port->timer_heap[b] = t;
+    port->timer_heap[a]->timer_heap_idx = a;
+    port->timer_heap[b]->timer_heap_idx = b;
+}
+
+static void port_timer_heap_up(QUIC_PORT *port, size_t idx)
+{
+    while (idx > 0) {
+        size_t parent = (idx - 1) / 2;
+
+        if (!port_timer_less(port->timer_heap[idx],
+                port->timer_heap[parent]))
+            break;
+
+        port_timer_heap_swap(port, idx, parent);
+        idx = parent;
+    }
+}
+
+static void port_timer_heap_down(QUIC_PORT *port, size_t idx)
+{
+    for (;;) {
+        size_t left = idx * 2 + 1, right = left + 1, best = idx;
+
+        if (left < port->timer_heap_num
+            && port_timer_less(port->timer_heap[left],
+                port->timer_heap[best]))
+            best = left;
+
+        if (right < port->timer_heap_num
+            && port_timer_less(port->timer_heap[right],
+                port->timer_heap[best]))
+            best = right;
+
+        if (best == idx)
+            break;
+
+        port_timer_heap_swap(port, idx, best);
+        idx = best;
+    }
+}
+
+static void port_timer_heap_insert(QUIC_PORT *port, QUIC_CHANNEL *ch)
+{
+    QUIC_CHANNEL **nheap;
+    size_t nalloc;
+
+    if (port->timer_heap_broken) {
+        ch->timer_heap_idx = SIZE_MAX;
+        return;
+    }
+
+    if (port->timer_heap_num == port->timer_heap_alloc) {
+        nalloc = port->timer_heap_alloc == 0 ? 16 : port->timer_heap_alloc * 2;
+        nheap = OPENSSL_realloc(port->timer_heap,
+            nalloc * sizeof(*port->timer_heap));
+        if (nheap == NULL) {
+            /*
+             * Allocation failure is not fatal. Fall back to scanning the
+             * channel list on every tick, which does not need the heap.
+             */
+            port->timer_heap_broken = 1;
+            ch->timer_heap_idx = SIZE_MAX;
+            return;
+        }
+
+        port->timer_heap = nheap;
+        port->timer_heap_alloc = nalloc;
+    }
+
+    ch->timer_heap_idx = port->timer_heap_num;
+    port->timer_heap[port->timer_heap_num++] = ch;
+    port_timer_heap_up(port, ch->timer_heap_idx);
+}
+
+static void port_timer_heap_remove(QUIC_PORT *port, QUIC_CHANNEL *ch)
+{
+    size_t idx = ch->timer_heap_idx, last;
+
+    ch->timer_heap_idx = SIZE_MAX;
+    if (port->timer_heap_broken || idx == SIZE_MAX
+        || idx >= port->timer_heap_num)
+        return;
+
+    last = --port->timer_heap_num;
+    if (idx != last) {
+        port->timer_heap[idx] = port->timer_heap[last];
+        port->timer_heap[idx]->timer_heap_idx = idx;
+        port_timer_heap_up(port, idx);
+        port_timer_heap_down(port, idx);
+    }
+
+    port->timer_heap[last] = NULL;
+}
+
+void ossl_quic_port_update_channel_deadline(QUIC_PORT *port, QUIC_CHANNEL *ch)
+{
+    if (port->timer_heap_broken)
+        return;
+
+    if (ch->timer_heap_idx == SIZE_MAX) {
+        port_timer_heap_insert(port, ch);
+        return;
+    }
+
+    port_timer_heap_up(port, ch->timer_heap_idx);
+    port_timer_heap_down(port, ch->timer_heap_idx);
+}
+
+void ossl_quic_port_unlink_channel(QUIC_PORT *port, QUIC_CHANNEL *ch)
+{
+    if (ch->on_active_channel_list) {
+        ossl_list_active_ch_remove(&port->active_channel_list, ch);
+        ch->on_active_channel_list = 0;
+    }
+
+    port_timer_heap_remove(port, ch);
+}
+
+void ossl_quic_port_mark_channel_active(QUIC_CHANNEL *ch)
+{
+    QUIC_PORT *port = ch->port;
+
+    ch->tick_dirty = 1;
+
+    /*
+     * Some unit tests construct a bare channel without a port.
+     */
+    if (port == NULL || !ch->on_port_list)
+        return;
+
+    /*
+     * Work discovered while the channel is already being ticked is serviced by
+     * that tick (or by the deadline it installs); do not queue an immediate
+     * second tick.
+     */
+    if (ch->in_subtick || ch->on_active_channel_list)
+        return;
+
+    ossl_list_active_ch_insert_tail(&port->active_channel_list, ch);
+    ch->on_active_channel_list = 1;
+}
+
+/*
  * Tick function for this port. This does everything related to network I/O for
  * this port's network BIOs, and services child channels.
+ *
+ * Only channels with pending work (the active list) or whose timer deadline has
+ * expired (the timer heap) are ticked. This keeps the cost of a tick
+ * proportional to the work available rather than to the number of connections
+ * on the port.
  */
 void ossl_quic_port_subtick(QUIC_PORT *port, QUIC_TICK_RESULT *res,
     uint32_t flags)
 {
     QUIC_CHANNEL *ch;
+    const QUIC_CHANNEL *last_ch = NULL;
+    size_t n;
+    OSSL_TIME now;
 
     res->net_read_desired = ossl_quic_port_is_running(port);
     res->net_write_desired = 0;
     res->notify_other_threads = 0;
     res->tick_deadline = ossl_time_infinite();
 
-    if (!port->engine->inhibit_tick) {
-        /* Handle any incoming data from network. */
-        if (ossl_quic_port_is_running(port))
-            port_rx_pre(port);
+    if (port->engine->inhibit_tick)
+        return;
 
-        /* Iterate through all channels and service them. */
+    /* Handle any incoming data from network. */
+    if (ossl_quic_port_is_running(port))
+        port_rx_pre(port);
+
+    /*
+     * If the timer heap could not be allocated, fall back to the old full
+     * scan. This is only expected on allocation failure.
+     */
+    if (port->timer_heap_broken) {
         OSSL_LIST_FOREACH (ch, ch, &port->channel_list) {
             QUIC_TICK_RESULT subr = { 0 };
 
             ossl_quic_channel_subtick(ch, &subr, flags);
             ossl_quic_tick_result_merge_into(res, &subr);
         }
+        return;
     }
+
+    /*
+     * Service channels marked active by the RX path or by an API action. Take
+     * a snapshot of the current list length: a channel marked active during its
+     * own tick is serviced on the next port tick, not recursively here.
+     */
+    n = ossl_list_active_ch_num(&port->active_channel_list);
+    while (n-- > 0) {
+        QUIC_TICK_RESULT subr = { 0 };
+
+        ch = ossl_list_active_ch_head(&port->active_channel_list);
+        if (ch == NULL)
+            break;
+
+        ossl_list_active_ch_remove(&port->active_channel_list, ch);
+        ch->on_active_channel_list = 0;
+
+        ossl_quic_channel_subtick(ch, &subr, flags);
+        ossl_quic_tick_result_merge_into(res, &subr);
+    }
+
+    /* Service channels whose timers have expired. */
+    now = get_time(port);
+    while (port->timer_heap_num > 0) {
+        QUIC_TICK_RESULT subr = { 0 };
+
+        ch = port->timer_heap[0];
+        if (ossl_time_compare(ch->next_tick_deadline, now) > 0)
+            break;
+
+        /*
+         * A tick is expected to advance an expired deadline. If it does not,
+         * leave the channel for the next port tick rather than spinning here.
+         */
+        if (ch == last_ch)
+            break;
+
+        last_ch = ch;
+
+        if (ch->on_active_channel_list) {
+            ossl_list_active_ch_remove(&port->active_channel_list, ch);
+            ch->on_active_channel_list = 0;
+        }
+
+        ossl_quic_channel_subtick(ch, &subr, flags);
+        ossl_quic_tick_result_merge_into(res, &subr);
+    }
+
+    if (port->timer_heap_num > 0)
+        res->tick_deadline = ossl_time_min(res->tick_deadline,
+            port->timer_heap[0]->next_tick_deadline);
 }
 
 /* Process incoming datagrams, if any. */

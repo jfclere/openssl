@@ -27,6 +27,7 @@
  */
 DECLARE_LIST_OF(ch, QUIC_CHANNEL);
 DECLARE_LIST_OF(incoming_ch, QUIC_CHANNEL);
+DECLARE_LIST_OF(active_ch, QUIC_CHANNEL);
 
 /* A port is always in one of the following states: */
 enum {
@@ -66,6 +67,22 @@ struct quic_port_st {
     /* List of all child channels. */
     OSSL_LIST(ch)
     channel_list;
+
+    /*
+     * Channels with pending work (RX, TX or an API action) which should be
+     * serviced by the next port tick. This is the work-gated subset of
+     * channel_list: idle channels are not walked on every tick.
+     */
+    OSSL_LIST(active_ch)
+    active_channel_list;
+
+    /*
+     * Min-heap of channels keyed by next_tick_deadline, used to find channels
+     * whose timers are due without scanning channel_list.
+     */
+    QUIC_CHANNEL **timer_heap;
+    size_t timer_heap_num, timer_heap_alloc;
+    unsigned int timer_heap_broken : 1;
 
     /*
      * Queue of unaccepted incoming channels. Each such channel is also on

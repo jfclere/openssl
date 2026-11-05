@@ -766,6 +766,9 @@ static int poll_readout(SSL_POLL_ITEM *items,
 #if !defined(OPENSSL_NO_QUIC) || !defined(OPENSSL_NO_DTLS)
     uint64_t events;
 #endif
+#ifndef OPENSSL_NO_QUIC
+    CRYPTO_MUTEX *quic_lock = NULL;
+#endif
     uint64_t revents;
 
     for (i = 0; i < num_items; ++i) {
@@ -787,7 +790,8 @@ static int poll_readout(SSL_POLL_ITEM *items,
             case SSL_TYPE_QUIC_LISTENER:
             case SSL_TYPE_QUIC_CONNECTION:
             case SSL_TYPE_QUIC_XSO:
-                if (!ossl_quic_conn_poll_events(ssl, events, do_tick, &revents))
+                if (!ossl_quic_conn_poll_events_with_lock(ssl, events,
+                        do_tick, &revents, &quic_lock))
                     /* above call raises ERR */
                     FAIL_ITEM(i);
 
@@ -799,6 +803,9 @@ static int poll_readout(SSL_POLL_ITEM *items,
 
 #ifndef OPENSSL_NO_DTLS
             case SSL_TYPE_DTLS_LISTENER:
+#ifndef OPENSSL_NO_QUIC
+                ossl_quic_conn_poll_release_lock(&quic_lock);
+#endif
                 if (!ossl_dtls_listener_poll_events(ssl, events, do_tick, &revents))
                     /* above call raises ERR */
                     FAIL_ITEM(i);
@@ -808,6 +815,9 @@ static int poll_readout(SSL_POLL_ITEM *items,
                 break;
             case SSL_TYPE_SSL_CONNECTION:
                 if (SSL_is_dtls(ssl)) {
+#ifndef OPENSSL_NO_QUIC
+                    ossl_quic_conn_poll_release_lock(&quic_lock);
+#endif
                     if (!ossl_dtls_conn_poll_events(ssl, events, do_tick, &revents))
                         /* above call raises ERR */
                         FAIL_ITEM(i);
@@ -846,6 +856,9 @@ static int poll_readout(SSL_POLL_ITEM *items,
     }
 
 out:
+#ifndef OPENSSL_NO_QUIC
+    ossl_quic_conn_poll_release_lock(&quic_lock);
+#endif
     if (p_result_count != NULL)
         *p_result_count = result_count;
 

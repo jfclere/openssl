@@ -176,6 +176,18 @@ int ossl_quic_set_diag_title(SSL_CTX *ctx, const char *title);
 /* APIs used by the polling infrastructure */
 int ossl_quic_conn_poll_events(SSL *ssl, uint64_t events, int do_tick,
     uint64_t *revents);
+
+/*
+ * As ossl_quic_conn_poll_events(), but allows a caller polling several QUIC
+ * objects to reuse the domain lock. *p_lock is the currently held domain
+ * mutex, or NULL. The function may release it and acquire another if the next
+ * object belongs to a different domain. On return the lock is still held; the
+ * caller must release it with ossl_quic_conn_poll_release_lock().
+ */
+int ossl_quic_conn_poll_events_with_lock(SSL *ssl, uint64_t events,
+    int do_tick, uint64_t *revents, CRYPTO_MUTEX **p_lock);
+void ossl_quic_conn_poll_release_lock(CRYPTO_MUTEX **p_lock);
+
 int ossl_quic_get_notifier_fd(SSL *ssl);
 /*
  * Blocking-section registration. Multi-reactor callers (e.g. SSL_poll) must

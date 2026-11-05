@@ -315,6 +315,12 @@ void ossl_quic_channel_inject(QUIC_CHANNEL *ch, QUIC_URXE *e);
 void ossl_quic_channel_inject_pkt(QUIC_CHANNEL *ch, OSSL_QRX_PKT *qpkt);
 
 /*
+ * Marks a channel as having work which requires a full tick on the next port
+ * tick. Safe to call from QUIC API functions and the demux path.
+ */
+void ossl_quic_channel_mark_active(QUIC_CHANNEL *ch);
+
+/*
  * Queries and Accessors
  * =====================
  */

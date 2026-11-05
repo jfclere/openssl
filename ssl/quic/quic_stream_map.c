@@ -230,6 +230,13 @@ static void stream_map_mark_active(QUIC_STREAM_MAP *qsm, QUIC_STREAM *s)
         qsm->rr_cur = s;
 
     s->active = 1;
+
+    /*
+     * The stream map can become active due to an application action (for
+     * example SSL_write) rather than network input. Make sure the port ticks
+     * this channel so the new data is actually sent.
+     */
+    ossl_quic_channel_mark_active(qsm->ch);
 }
 
 static void stream_map_mark_inactive(QUIC_STREAM_MAP *qsm, QUIC_STREAM *s)
@@ -839,6 +846,20 @@ void ossl_quic_stream_map_gc(QUIC_STREAM_MAP *qsm)
     while ((qs = ready_for_gc_head(&qsm->ready_for_gc_list)) != NULL) {
         ossl_quic_stream_map_release(qsm, qs);
     }
+}
+
+int ossl_quic_stream_map_has_pending_work(const QUIC_STREAM_MAP *qsm)
+{
+    if (qsm == NULL || qsm->map == NULL)
+        return 0;
+
+    /*
+     * The active list holds every stream with something to send, retransmit
+     * or signal. The ready-for-GC list holds streams which still need to be
+     * reclaimed. Neither can be serviced without a full channel tick.
+     */
+    return qsm->active_list.next != &qsm->active_list
+        || qsm->ready_for_gc_list.next != &qsm->ready_for_gc_list;
 }
 
 static int eligible_for_shutdown_flush(QUIC_STREAM *qs)

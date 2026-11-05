@@ -68,6 +68,7 @@ struct quic_channel_st {
      */
     OSSL_LIST_MEMBER(ch, QUIC_CHANNEL);
     OSSL_LIST_MEMBER(incoming_ch, QUIC_CHANNEL);
+    OSSL_LIST_MEMBER(active_ch, QUIC_CHANNEL);
 
     /*
      * The associated TLS 1.3 connection data. Used to provide the handshake
@@ -497,6 +498,27 @@ struct quic_channel_st {
 
     /* Are we on the QUIC_PORT linked list of channels? */
     unsigned int on_port_list : 1;
+
+    /*
+     * Cached deadline for the next full channel tick, as determined by the
+     * last full tick. Used to skip the full tick for an idle channel whose
+     * timers are not yet due and which has no pending work. This is what keeps
+     * a fleet of idle connections from being fully serviced on every engine
+     * tick.
+     */
+    OSSL_TIME next_tick_deadline;
+
+    /* Set when an API action requires a full channel tick to be scheduled. */
+    unsigned int tick_dirty : 1;
+
+    /* Is this channel on the port's active channel list? */
+    unsigned int on_active_channel_list : 1;
+
+    /* Are we currently inside a channel tick? */
+    unsigned int in_subtick : 1;
+
+    /* Index of this channel in the port timer min-heap, or SIZE_MAX. */
+    size_t timer_heap_idx;
 
     /* Has qlog been requested? */
     unsigned int use_qlog : 1;

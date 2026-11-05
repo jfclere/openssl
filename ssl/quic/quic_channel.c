@@ -40,6 +40,7 @@ DEFINE_LIST_OF_IMPL(ch, QUIC_CHANNEL);
 static void ch_save_err_state(QUIC_CHANNEL *ch);
 static int ch_rx(QUIC_CHANNEL *ch, int channel_only, int *notify_other_threads);
 static int ch_tx(QUIC_CHANNEL *ch, int *notify_other_threads);
+static void ch_subtick(QUIC_CHANNEL *ch, QUIC_TICK_RESULT *res, uint32_t flags);
 static int ch_tick_tls(QUIC_CHANNEL *ch, int channel_only, int *notify_other_threads);
 static void ch_rx_handle_packet(QUIC_CHANNEL *ch, int channel_only);
 static OSSL_TIME ch_determine_next_tick_deadline(QUIC_CHANNEL *ch);
@@ -349,12 +350,21 @@ static int ch_init(QUIC_CHANNEL *ch)
 
     ch->max_idle_timeout = ch->max_idle_timeout_local_req;
 
+    /*
+     * Until the first full tick runs, there is no cached deadline and a tick
+     * must not be skipped.
+     */
+    ch->next_tick_deadline = ossl_time_infinite();
+    ch->timer_heap_idx = SIZE_MAX;
+
     ossl_ackm_set_tx_max_ack_delay(ch->ackm, ossl_ms2time(ch->tx_max_ack_delay));
     ossl_ackm_set_rx_max_ack_delay(ch->ackm, ossl_ms2time(ch->rx_max_ack_delay));
 
     ch_update_idle(ch);
     ossl_list_ch_insert_tail(&ch->port->channel_list, ch);
     ch->on_port_list = 1;
+    ossl_quic_port_update_channel_deadline(ch->port, ch);
+    ossl_quic_channel_mark_active(ch);
     return 1;
 
 err:
@@ -436,6 +446,7 @@ static void ch_cleanup(QUIC_CHANNEL *ch)
     ch->pending_new_token = NULL;
 
     if (ch->on_port_list) {
+        ossl_quic_port_unlink_channel(ch->port, ch);
         ossl_list_ch_remove(&ch->port->channel_list, ch);
         ch->on_port_list = 0;
     }
@@ -614,6 +625,8 @@ int ossl_quic_channel_schedule_new_token(QUIC_CHANNEL *ch,
     size_t token_len)
 {
     int rc = 0;
+
+    ossl_quic_channel_mark_active(ch);
     QUIC_CFQ_ITEM *cfq_item;
     WPACKET wpkt;
     BUF_MEM *buf_mem = NULL;
@@ -2111,11 +2124,89 @@ err:
  */
 
 /*
+ * Returns 1 if the channel has no work which requires a full tick. A full tick
+ * is needed if there is queued RX or TX, if a stream has pending work, or if
+ * the next timer deadline is due. This is deliberately cheap: it is evaluated
+ * for every channel on the port on every engine tick, whereas the full tick is
+ * much more expensive.
+ */
+static int ch_tick_can_skip(QUIC_CHANNEL *ch)
+{
+    /*
+     * The handshake layer can have non-network work pending (for example a
+     * certificate verification retry), so never skip a tick before the
+     * handshake completes.
+     */
+    if (!ch->handshake_complete)
+        return 0;
+
+    if (ossl_qrx_processed_read_pending(ch->qrx)
+        || ossl_qrx_unprocessed_read_pending(ch->qrx))
+        return 0;
+
+    if (ossl_qtx_get_queue_len_datagrams(ch->qtx) > 0)
+        return 0;
+
+    if (ossl_quic_stream_map_has_pending_work(&ch->qsm))
+        return 0;
+
+    return ossl_time_compare(get_time(ch), ch->next_tick_deadline) < 0;
+}
+
+/*
  * The central ticker function called by the reactor. This does everything, or
  * at least everything network I/O related. Best effort - not allowed to fail
  * "loudly".
  */
 void ossl_quic_channel_subtick(QUIC_CHANNEL *ch, QUIC_TICK_RESULT *res,
+    uint32_t flags)
+{
+    int channel_only = (flags & QUIC_REACTOR_TICK_FLAG_CHANNEL_ONLY) != 0;
+    int dirty = ch->tick_dirty;
+
+    ch->tick_dirty = 0;
+
+    /*
+     * An idle or terminated channel has nothing to do. Handle this here so a
+     * fleet of idle connections does not pay for the full tick below.
+     */
+    if (ch->state == QUIC_CHANNEL_STATE_IDLE
+        || ossl_quic_channel_is_terminated(ch)) {
+        res->net_read_desired = 0;
+        res->net_write_desired = 0;
+        res->notify_other_threads = 0;
+        res->tick_deadline = ossl_time_infinite();
+        if (ossl_time_compare(ch->next_tick_deadline, res->tick_deadline) != 0) {
+            ch->next_tick_deadline = res->tick_deadline;
+            ossl_quic_port_update_channel_deadline(ch->port, ch);
+        }
+        return;
+    }
+
+    if (!channel_only && !dirty && ch_tick_can_skip(ch)) {
+        res->net_read_desired = 1;
+        res->net_write_desired = 0;
+        res->notify_other_threads = 0;
+        res->tick_deadline = ch->next_tick_deadline;
+        return;
+    }
+
+    ch->in_subtick = 1;
+    ch_subtick(ch, res, flags);
+    ch->in_subtick = 0;
+    ch->next_tick_deadline = res->tick_deadline;
+    ossl_quic_port_update_channel_deadline(ch->port, ch);
+
+    /*
+     * The handshake layer can make progress without network input (for example
+     * an application-driven certificate verification retry), so keep a
+     * handshaking channel scheduled until the handshake completes.
+     */
+    if (!ch->handshake_complete && !ossl_quic_channel_is_term_any(ch))
+        ossl_quic_channel_mark_active(ch);
+}
+
+static void ch_subtick(QUIC_CHANNEL *ch, QUIC_TICK_RESULT *res,
     uint32_t flags)
 {
     OSSL_TIME now, deadline;
@@ -2967,6 +3058,7 @@ int ossl_quic_channel_start(QUIC_CHANNEL *ch)
     if (!ch_tick_tls(ch, /*channel_only=*/0, NULL))
         return 0;
 
+    ossl_quic_channel_mark_active(ch);
     ossl_quic_reactor_tick(ossl_quic_port_get0_reactor(ch->port), 0); /* best effort */
     return 1;
 }
@@ -3258,6 +3350,8 @@ static void ch_start_terminating(QUIC_CHANNEL *ch,
     const QUIC_TERMINATE_CAUSE *tcause,
     int force_immediate)
 {
+    ossl_quic_channel_mark_active(ch);
+
     /* No point sending anything if we haven't sent anything yet. */
     if (!ch->have_sent_any_pkt)
         force_immediate = 1;
@@ -3517,12 +3611,19 @@ static void ch_save_err_state(QUIC_CHANNEL *ch)
 
 void ossl_quic_channel_inject(QUIC_CHANNEL *ch, QUIC_URXE *e)
 {
+    ossl_quic_channel_mark_active(ch);
     ossl_qrx_inject_urxe(ch->qrx, e);
 }
 
 void ossl_quic_channel_inject_pkt(QUIC_CHANNEL *ch, OSSL_QRX_PKT *qpkt)
 {
+    ossl_quic_channel_mark_active(ch);
     ossl_qrx_inject_pkt(ch->qrx, qpkt);
+}
+
+void ossl_quic_channel_mark_active(QUIC_CHANNEL *ch)
+{
+    ossl_quic_port_mark_channel_active(ch);
 }
 
 void ossl_quic_channel_on_stateless_reset(QUIC_CHANNEL *ch)
@@ -4147,6 +4248,7 @@ int ossl_quic_channel_trigger_txku(QUIC_CHANNEL *ch)
     if (!txku_allowed(ch))
         return 0;
 
+    ossl_quic_channel_mark_active(ch);
     ch->ku_locally_initiated = 1;
     ch_trigger_txku(ch);
     return 1;
@@ -4156,6 +4258,7 @@ int ossl_quic_channel_ping(QUIC_CHANNEL *ch)
 {
     int pn_space = ossl_quic_enc_level_to_pn_space(ch->tx_enc_level);
 
+    ossl_quic_channel_mark_active(ch);
     ossl_quic_tx_packetiser_schedule_ack_eliciting(ch->txp, pn_space);
 
     return 1;

@@ -5896,9 +5896,21 @@ static int test_poll_event_ic(QUIC_LISTENER *ql)
     return ossl_quic_port_get_num_incoming_channels(ql->port) > 0;
 }
 
+void ossl_quic_conn_poll_release_lock(CRYPTO_MUTEX **p_lock)
+{
+#if defined(OPENSSL_THREADS)
+    if (*p_lock != NULL) {
+        ossl_crypto_mutex_unlock(*p_lock);
+        *p_lock = NULL;
+    }
+#else
+    *p_lock = NULL;
+#endif
+}
+
 QUIC_TAKES_LOCK
-int ossl_quic_conn_poll_events(SSL *ssl, uint64_t events, int do_tick,
-    uint64_t *p_revents)
+int ossl_quic_conn_poll_events_with_lock(SSL *ssl, uint64_t events,
+    int do_tick, uint64_t *p_revents, CRYPTO_MUTEX **p_lock)
 {
     QCTX ctx;
     uint64_t revents = 0;
@@ -5906,7 +5918,19 @@ int ossl_quic_conn_poll_events(SSL *ssl, uint64_t events, int do_tick,
     if (!expect_quic_csl(ssl, &ctx))
         return 0;
 
-    qctx_lock(&ctx);
+#if defined(OPENSSL_THREADS)
+    {
+        CRYPTO_MUTEX *mutex = ossl_quic_obj_get0_mutex(ctx.obj);
+
+        if (*p_lock != mutex) {
+            ossl_quic_conn_poll_release_lock(p_lock);
+            ossl_crypto_mutex_lock(mutex);
+            *p_lock = mutex;
+        }
+    }
+#else
+    *p_lock = NULL;
+#endif
 
     if (ctx.qc != NULL && !ctx.qc->started) {
         /* We can only try to write on non-started connection. */
@@ -5975,9 +5999,20 @@ int ossl_quic_conn_poll_events(SSL *ssl, uint64_t events, int do_tick,
     }
 
 end:
-    qctx_unlock(&ctx);
     *p_revents = revents;
     return 1;
+}
+
+QUIC_TAKES_LOCK
+int ossl_quic_conn_poll_events(SSL *ssl, uint64_t events, int do_tick,
+    uint64_t *p_revents)
+{
+    CRYPTO_MUTEX *lock = NULL;
+    int ret = ossl_quic_conn_poll_events_with_lock(ssl, events, do_tick,
+        p_revents, &lock);
+
+    ossl_quic_conn_poll_release_lock(&lock);
+    return ret;
 }
 
 QUIC_TAKES_LOCK

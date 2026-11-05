@@ -201,6 +201,15 @@ void ossl_quic_port_restore_err_state(const QUIC_PORT *port);
 void ossl_quic_port_subtick(QUIC_PORT *port, QUIC_TICK_RESULT *r,
     uint32_t flags);
 
+/*
+ * For use by QUIC_CHANNEL. Schedules the channel for service on the next port
+ * tick and updates its entry in the port's timer heap after its cached
+ * next_tick_deadline has changed.
+ */
+void ossl_quic_port_mark_channel_active(QUIC_CHANNEL *ch);
+void ossl_quic_port_update_channel_deadline(QUIC_PORT *port, QUIC_CHANNEL *ch);
+void ossl_quic_port_unlink_channel(QUIC_PORT *port, QUIC_CHANNEL *ch);
+
 /* Returns the number of queued incoming channels. */
 size_t ossl_quic_port_get_num_incoming_channels(const QUIC_PORT *port);
 
